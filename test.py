@@ -1,13 +1,8 @@
-# ===== IMPORTS =====
-# OpenCV: Computer vision library for image processing and display
-# MediaPipe: Google's ML framework for hand detection and landmark tracking
-# NumPy: Numerical computing library for array operations and calculations
 import cv2
 import mediapipe as mp
 import numpy as np
 
-# Initialize MediaPipe hands solution for hand tracking
-mp_hands = mp.solutions.hands
+mp_hands = mp.solutions.hands 
 
 # Initialize video capture from default camera (0)
 cap = cv2.VideoCapture(0)

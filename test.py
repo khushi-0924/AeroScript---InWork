@@ -2,15 +2,43 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-mp_hands = mp.solutions.hands
+# ===== IMPROVED SHAPE DETECTION =====
+def detect_shape(contour):
+    shape = "Unknown"
 
+    contour = cv2.convexHull(contour)  # smooth + fix gaps
+
+    peri = cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, 0.03 * peri, True)
+
+    sides = len(approx)
+
+    if sides == 3:
+        shape = "Triangle"
+
+    elif sides == 4:
+        x, y, w, h = cv2.boundingRect(approx)
+        ar = w / float(h)
+        shape = "Square" if 0.8 <= ar <= 1.2 else "Rectangle"
+
+    elif sides > 4:
+        area = cv2.contourArea(contour)
+        circularity = (4 * np.pi * area) / (peri * peri)
+
+        if circularity > 0.6:
+            shape = "Circle"
+
+    return shape, approx
+
+
+mp_hands = mp.solutions.hands
 cap = cv2.VideoCapture(0)
 
 canvas = None
 prev_x, prev_y = None, None
 
 draw_color = (0, 0, 200)
-brush_thickness = 10
+brush_thickness = 5
 
 white_mode = False
 eraser_mode = False
@@ -18,19 +46,23 @@ eraser_mode = False
 prev_pinch_x, prev_pinch_y = None, None
 pinch_active = False
 
+drawing_points = []
+
 with mp_hands.Hands(max_num_hands=1,
                     min_detection_confidence=0.7,
                     min_tracking_confidence=0.7) as hands:
 
-    # cv2.namedWindow("Hand Painter", cv2.WINDOW_FULLSCREEN)
+    cv2.namedWindow("Hand Painter", cv2.WINDOW_NORMAL)
 
     while True:
         success, frame = cap.read()
         if not success:
             break
 
+        if cv2.getWindowProperty("Hand Painter", cv2.WND_PROP_VISIBLE) < 1:
+            break
+
         frame = cv2.flip(frame, 1)
-        # frame = cv2.resize(frame, (1920, 1080))  # ✅ CORRECT - frame exists now
 
         if canvas is None:
             canvas = np.zeros_like(frame)
@@ -42,11 +74,9 @@ with mp_hands.Hands(max_num_hands=1,
 
         h, w, _ = frame.shape
 
-        # ===== UI SETTINGS =====
         color_w = w // 5
         bar_h = 80
 
-        # ===== BIN SETTINGS =====
         bin_w, bin_h = 100, 60
         bin_x1, bin_y1 = w//2 - bin_w//2, h - bin_h
         bin_x2, bin_y2 = bin_x1 + bin_w, h
@@ -68,60 +98,49 @@ with mp_hands.Hands(max_num_hands=1,
                 index_up = index_tip.y < index_pip.y
                 middle_up = middle_tip.y < middle_pip.y
 
-                # ===== PINCH DETECTION =====
                 dist = np.hypot(cx - tx, cy - ty)
 
+                # ===== PINCH =====
                 if dist < 40:
                     pinch_active = True
-                    alpha = 0.2  # smoothing
 
-                    if prev_pinch_x is not None and prev_pinch_y is not None:
-                        smooth_x = int(alpha * cx + (1 - alpha) * prev_pinch_x)
-                        smooth_y = int(alpha * cy + (1 - alpha) * prev_pinch_y)
+                    if prev_pinch_x is not None:
+                        dx = cx - prev_pinch_x
+                        dy = cy - prev_pinch_y
+                        canvas = np.roll(canvas, dx, axis=1)
+                        canvas = np.roll(canvas, dy, axis=0)
 
-                        dx = smooth_x - prev_pinch_x
-                        dy = smooth_y - prev_pinch_y
-
-                        canvas = np.roll(canvas, shift=dx, axis=1)
-                        canvas = np.roll(canvas, shift=dy, axis=0)
-
-                        prev_pinch_x, prev_pinch_y = smooth_x, smooth_y
-                    else:
-                        prev_pinch_x, prev_pinch_y = cx, cy
+                    prev_pinch_x, prev_pinch_y = cx, cy
 
                 else:
                     pinch_active = False
                     prev_pinch_x, prev_pinch_y = None, None
 
-                    # ===== SELECTION MODE =====
+                    # ===== SELECTION =====
                     if index_up and middle_up:
                         prev_x, prev_y = None, None
+                        drawing_points = []
 
                         if cy < bar_h:
-
-                            if 0 < cx < color_w:
+                            if cx < color_w:
                                 draw_color = (0, 0, 200)
                                 eraser_mode = False
-
-                            elif color_w < cx < 2*color_w:
+                            elif cx < 2*color_w:
                                 draw_color = (0, 200, 0)
                                 eraser_mode = False
-
-                            elif 2*color_w < cx < 3*color_w:
+                            elif cx < 3*color_w:
                                 draw_color = (200, 0, 0)
                                 eraser_mode = False
-
-                            elif 3*color_w < cx < 4*color_w:
+                            elif cx < 4*color_w:
                                 eraser_mode = True
-
-                            elif 4*color_w < cx < 5*color_w:
+                            else:
                                 white_mode = not white_mode
-                                prev_x, prev_y = None, None
 
-                    # ===== DRAW MODE =====
+                    # ===== DRAW =====
                     elif index_up:
+                        drawing_points.append((cx, cy))
 
-                        if prev_x is not None and prev_y is not None:
+                        if prev_x is not None:
                             dx = cx - prev_x
                             dy = cy - prev_y
                             dist = int(np.hypot(dx, dy))
@@ -140,20 +159,49 @@ with mp_hands.Hands(max_num_hands=1,
                         prev_x, prev_y = cx, cy
 
                     else:
+                        # ===== FAST + ROBUST SHAPE DETECTION =====
+                        if len(drawing_points) > 25:
+
+                            pts = np.array(drawing_points, dtype=np.int32)
+
+                            # auto-close shape
+                            pts = np.vstack([pts, pts[0]])
+
+                            contour = pts.reshape((-1, 1, 2))
+
+                            shape, approx = detect_shape(contour)
+
+                            # erase rough
+                            for p in drawing_points:
+                                cv2.circle(canvas, p, brush_thickness+2, (0, 0, 0), -1)
+
+                            # draw perfect
+                            if shape == "Circle":
+                                (x, y), r = cv2.minEnclosingCircle(contour)
+                                cv2.circle(canvas, (int(x), int(y)), int(r), draw_color, 3)
+
+                            elif shape in ["Rectangle", "Square"]:
+                                x, y, w, h = cv2.boundingRect(contour)
+                                cv2.rectangle(canvas, (x, y), (x+w, y+h), draw_color, 3)
+
+                            elif shape == "Triangle":
+                                cv2.drawContours(canvas, [approx], -1, draw_color, 3)
+
+                        drawing_points = []
                         prev_x, prev_y = None, None
 
         else:
             prev_x, prev_y = None, None
+            drawing_points = []
 
-        # ===== DELETE IF DROPPED IN BIN =====
-        if pinch_active and cx is not None and cy is not None:
+        # ===== BIN DELETE =====
+        if pinch_active and cx is not None:
             if bin_x1 < cx < bin_x2 and bin_y1 < cy < bin_y2:
                 canvas = np.zeros_like(frame)
 
-        # ===== BACKGROUND =====
+        # ===== MERGE =====
         bg = white_canvas if white_mode else frame
 
-        # ===== MERGE =====
         gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
         _, mask = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)
         mask_inv = cv2.bitwise_not(mask)
@@ -163,7 +211,7 @@ with mp_hands.Hands(max_num_hands=1,
             cv2.bitwise_and(canvas, canvas, mask=mask)
         )
 
-        # ===== UI BAR =====
+        # ===== UI =====
         cv2.rectangle(combined, (0, 0), (color_w, bar_h), (0, 0, 200), -1)
         cv2.rectangle(combined, (color_w, 0), (2*color_w, bar_h), (0, 200, 0), -1)
         cv2.rectangle(combined, (2*color_w, 0), (3*color_w, bar_h), (200, 0, 0), -1)
@@ -177,14 +225,12 @@ with mp_hands.Hands(max_num_hands=1,
                       (5*color_w-20, bar_h-20),
                       (255,255,255), 3)
 
-        # ===== BIN (ONLY DURING PINCH) =====
         if pinch_active:
             cv2.rectangle(combined, (bin_x1, bin_y1), (bin_x2, bin_y2), (0,0,255), -1)
             cv2.putText(combined, "BIN", (bin_x1+20, bin_y1+40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
 
-        # ===== POINTER =====
-        if cx is not None and cy is not None:
+        if cx is not None:
             cv2.circle(combined, (cx, cy), 10, (0,0,0), -1)
             cv2.circle(combined, (cx, cy), 6, (0,255,255), -1)
 
